@@ -2,7 +2,6 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import * as express from 'express';
 import 'reflect-metadata';
 import * as requestIp from 'request-ip';
 import helmet from 'helmet';
@@ -37,9 +36,6 @@ async function bootstrap() {
       parameterLimit: 50000,
     }),
   );
-
-  app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: true }));
 
   app.setGlobalPrefix('api');
 
