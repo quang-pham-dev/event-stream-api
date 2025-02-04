@@ -17,6 +17,7 @@ async function bootstrap() {
   });
   const configService = app.get(ConfigService);
   const PORT = configService.get<number>('PORT') || 8081;
+  app.set('trust proxy', 'loopback');
 
   // #Application Settings
   app.use(requestIp.mw());
