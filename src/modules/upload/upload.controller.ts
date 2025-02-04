@@ -12,6 +12,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
+import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
 import {
   ApiTags,
   ApiOperation,
@@ -20,19 +21,17 @@ import {
   ApiResponse,
   ApiParam,
 } from '@nestjs/swagger';
-import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
 
 import { MAX_SIZE } from '@/common/constants/video';
 import { UploadService } from './upload.service';
-import { UploadVideoDto } from './dto/upload-video.dto';
-import { VideoResponseDto } from './dto/video-response.dto';
+import { UploadResponseDto } from './dto/upload-response.dto';
 
 @ApiTags('Upload')
 @Controller('upload')
 export class UploadController {
   constructor(private readonly uploadService: UploadService) {}
 
-  @ApiOperation({ summary: 'Upload a video file' })
+  @ApiOperation({ summary: 'Upload a single video file' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
@@ -45,7 +44,7 @@ export class UploadController {
         },
         title: {
           type: 'string',
-          description: 'Title of the video',
+          description: 'Title of the video (optional)',
         },
       },
     },
@@ -53,7 +52,7 @@ export class UploadController {
   @ApiResponse({
     status: 201,
     description: 'Video uploaded successfully',
-    type: VideoResponseDto,
+    type: UploadResponseDto,
   })
   @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,
@@ -75,9 +74,48 @@ export class UploadController {
         }),
     )
     file: Express.Multer.File,
-    @Body() uploadVideoDto: UploadVideoDto,
-  ): Promise<VideoResponseDto> {
-    return this.uploadService.uploadVideo(file, uploadVideoDto.title);
+    @Body('title') title?: string,
+  ): Promise<UploadResponseDto> {
+    return this.uploadService.uploadVideo(file, title);
+  }
+
+  @ApiOperation({ summary: 'Upload a single image file' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        image: {
+          type: 'string',
+          format: 'binary',
+          description: 'Image file (jpeg, png, gif, webp)',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Image uploaded successfully',
+    type: UploadResponseDto,
+  })
+  @Post('image')
+  @UseInterceptors(FileInterceptor('image'))
+  async uploadImage(
+    @UploadedFile(
+      new ParseFilePipeBuilder()
+        .addFileTypeValidator({
+          fileType: /(jpg|jpeg|png|gif|webp)$/,
+        })
+        .addMaxSizeValidator({
+          maxSize: 5 * 1024 * 1024, // 5MB
+        })
+        .build({
+          errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+        }),
+    )
+    file: Express.Multer.File,
+  ): Promise<UploadResponseDto> {
+    return this.uploadService.uploadImage(file);
   }
 
   @ApiOperation({ summary: 'Upload multiple video files' })
@@ -100,10 +138,8 @@ export class UploadController {
           type: 'array',
           items: {
             type: 'string',
-            maxLength: 255,
-            pattern: '^[a-zA-Z0-9-_. ]+$',
           },
-          description: 'Titles of the videos (optional)',
+          description: 'Titles for the videos (optional)',
         },
       },
     },
@@ -111,64 +147,7 @@ export class UploadController {
   @ApiResponse({
     status: 201,
     description: 'Videos upload results',
-    schema: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          status: {
-            type: 'string',
-            enum: ['success', 'failed'],
-            description: 'Upload status for this file',
-          },
-          data: {
-            type: 'object',
-            description: 'Video metadata (only present if status is success)',
-            properties: {
-              id: { type: 'string', description: 'Video ID' },
-              title: { type: 'string', description: 'Video title' },
-              status: { type: 'string', description: 'Video status' },
-              duration: {
-                type: 'number',
-                description: 'Video duration in seconds',
-              },
-              aspectRatio: {
-                type: 'string',
-                description: 'Video aspect ratio',
-              },
-              playbackId: {
-                type: 'string',
-                description: 'Playback ID for streaming',
-                nullable: true,
-              },
-              createdAt: {
-                type: 'string',
-                format: 'date-time',
-                description: 'Creation timestamp',
-              },
-              uploadId: { type: 'string', description: 'Upload ID' },
-              s3Url: { type: 'string', description: 'S3 storage URL' },
-            },
-          },
-          error: {
-            type: 'string',
-            description: 'Error message (only present if status is failed)',
-          },
-          fileName: {
-            type: 'string',
-            description: 'Original file name',
-          },
-        },
-      },
-    },
-  })
-  @ApiResponse({
-    status: HttpStatus.UNPROCESSABLE_ENTITY,
-    description: 'Invalid file type or size exceeds limit',
-  })
-  @ApiResponse({
-    status: HttpStatus.TOO_MANY_REQUESTS,
-    description: 'Too many upload requests',
+    type: [UploadResponseDto],
   })
   @Post('videos')
   @UseInterceptors(FilesInterceptor('videos'))
@@ -187,22 +166,59 @@ export class UploadController {
     )
     files: Express.Multer.File[],
     @Body('titles') rawTitles?: string[],
-  ): Promise<
-    Array<{
-      status: 'success' | 'failed';
-      data?: VideoResponseDto;
-      error?: string;
-      fileName: string;
-    }>
-  > {
+  ): Promise<UploadResponseDto[]> {
     // Sanitize titles
     const titles = Array.isArray(rawTitles)
       ? rawTitles.map(
           (title) => title?.trim().replace(/[^a-zA-Z0-9-_. ]/g, '') || '',
         )
-      : [];
+      : undefined;
 
     return this.uploadService.uploadMultipleVideos(files, titles);
+  }
+
+  @ApiOperation({ summary: 'Upload multiple image files' })
+  @ApiConsumes('multipart/form-data')
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { ttl: 60000, limit: 5 } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        images: {
+          type: 'array',
+          items: {
+            type: 'string',
+            format: 'binary',
+          },
+          description: 'Image files (jpeg, png, gif, webp)',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Images upload results',
+    type: [UploadResponseDto],
+  })
+  @Post('images')
+  @UseInterceptors(FilesInterceptor('images'))
+  async uploadMultipleImages(
+    @UploadedFiles(
+      new ParseFilePipeBuilder()
+        .addFileTypeValidator({
+          fileType: /(jpg|jpeg|png|gif|webp)$/,
+        })
+        .addMaxSizeValidator({
+          maxSize: 5 * 1024 * 1024, // 5MB
+        })
+        .build({
+          errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+        }),
+    )
+    files: Express.Multer.File[],
+  ): Promise<UploadResponseDto[]> {
+    return this.uploadService.uploadMultipleImages(files);
   }
 
   @ApiOperation({ summary: 'Get video processing status' })
@@ -227,8 +243,7 @@ export class UploadController {
     },
   })
   @Get('video/:id/status')
-  async getVideoStatus(@Param('id') id: string): Promise<{ status: string }> {
-    const status = await this.uploadService.getVideoStatus(id);
-    return { status };
+  async getVideoStatus(@Param('id') id: string): Promise<string> {
+    return this.uploadService.getVideoStatus(id);
   }
 }
